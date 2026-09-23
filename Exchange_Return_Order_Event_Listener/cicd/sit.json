@@ -1,0 +1,6 @@
+{
+  "parameters": {
+    "SenderAddress": "/exchange-return-order-event-sit"
+  },
+  "inherit": []
+}

@@ -1,0 +1,49 @@
+
+name: SAP CPI - Deploy SIT
+
+on:
+  push:
+    branches:
+      - sit
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sap-cpi-sit
+  cancel-in-progress: false
+
+jobs:
+  deploy-sit:
+    name: Deploy Integration Flow to SIT
+    runs-on: ubuntu-latest
+    environment: CPI_SIT
+    env:
+      CPI_API_URL: ${{ secrets.CPI_API_URL }}
+      CPI_TOKEN_URL: ${{ secrets.CPI_TOKEN_URL }}
+      CPI_CLIENT_ID: ${{ secrets.CPI_CLIENT_ID }}
+      CPI_CLIENT_SECRET: ${{ secrets.CPI_CLIENT_SECRET }}
+    steps:
+      - name: Checkout SIT branch
+        uses: actions/checkout@v4
+
+      - name: Verify required tools
+        run: |
+          set -euo pipefail
+
+          for cmd in bash curl jq python3 zip unzip base64; do
+            command -v "$cmd"
+          done
+
+      - name: Validate Integration Flow
+        run: |
+          bash scripts/promote-iflow.sh \
+            Exchange_Return_Order_Event_Listener \
+            SIT \
+            --dry-run
+
+      - name: Deploy Integration Flow
+        run: |
+          bash scripts/promote-iflow.sh \
+            Exchange_Return_Order_Event_Listener \
+            SIT
