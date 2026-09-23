@@ -1,0 +1,24 @@
+{
+  "source": {
+    "artifactId": "Exchange_Return_Order_Event_Listener",
+    "packageId": "TestFCG",
+    "version": "1.0.0"
+  },
+  "targets": {
+    "SIT": {
+      "artifactId": "Exchange_Return_Order_Event_Listener_SIT",
+      "artifactName": "Exchange Return Order Event Listener SIT",
+      "packageId": "OrdersManagementSIT"
+    },
+    "UAT": {
+      "artifactId": "Exchange_Return_Order_Event_Listener_UAT",
+      "artifactName": "Exchange Return Order Event Listener UAT",
+      "packageId": "OrdersManagementUAT"
+    },
+    "PROD": {
+      "artifactId": "Exchange_Return_Order_Event_Listener",
+      "artifactName": "Exchange Return Order Event Listener",
+      "packageId": "OrdersManagementPROD"
+    }
+  }
+}
