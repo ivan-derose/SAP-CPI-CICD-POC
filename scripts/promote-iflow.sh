@@ -1,164 +1,90 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# promote-iflow.sh
-#
-# Promuove un SAP CPI Integration Flow da un artifact sorgente a uno target
-# sullo stesso tenant/API endpoint, gestendo:
-# - OAuth Client Credentials
-# - download ZIP sorgente
-# - cambio Technical ID nei metadati interni
-# - CREATE o UPDATE dell'artifact target
-# - configurazioni externalized via API
-# - deploy
-# - polling BuildAndDeployStatus
-# - verifica Runtime STARTED
-#
-# Variabili ambiente richieste:
-#   CPI_API_URL
-#   CPI_TOKEN_URL
-#   CPI_CLIENT_ID
-#   CPI_CLIENT_SECRET
-#
-# Uso:
-#   ./promote-iflow.sh \
-#     <SOURCE_ID> \
-#     <SOURCE_PACKAGE> \
-#     <TARGET_ID> \
-#     <TARGET_PACKAGE> \
-#     <TARGET_NAME> \
-#     [CONFIG_JSON]
-#
-# Esempio:
-#   ./promote-iflow.sh \
-#     Exchange_Return_Order_Event_Listener \
-#     TestFCG \
-#     Exchange_Return_Order_Event_Listener_SIT \
-#     OrdersManagementSIT \
-#     "Exchange Return Order Event Listener SIT" \
-#     sit-config.json
-#
-# Formato CONFIG_JSON (v2, richiede resolve-iflow-config.py nella stessa cartella):
-# {"parameters":{"SenderAddress":"/exchange-return-order-event-sit"},"inherit":[]}
-# Uso --dry-run come settimo argomento per sola validazione read-only.
-# Ogni chiave in parameters.prop deve comparire in parameters o in inherit.
+# Promozione da un progetto iFlow presente nel repository Git a SAP CPI.
+# Uso: ./scripts/promote-iflow.sh <IFLOW_DIRECTORY> <SIT|UAT|PROD> [--dry-run]
+# Legge cicd/artifact.json e cicd/<ambiente>.json dalla cartella iFlow.
+# --dry-run lavora esclusivamente in locale e non contatta SAP CPI.
+# Per il deploy servono CPI_API_URL, CPI_TOKEN_URL, CPI_CLIENT_ID,
+# CPI_CLIENT_SECRET. Richiede resolve-iflow-config.py accanto allo script.
 
-SOURCE_ID="${1:-}"
-SOURCE_PACKAGE="${2:-}"
-TARGET_ID="${3:-}"
-TARGET_PACKAGE="${4:-}"
-TARGET_NAME="${5:-}"
-CONFIG_JSON="${6:-}"
+# Usage: scripts/promote-iflow.sh <IFLOW_DIRECTORY> <SIT|UAT|PROD> [--dry-run]
+IFLOW="${1:-}"
+ENVIRONMENT="${2:-}"
 DRY_RUN=false
-if [[ "${7:-}" == "--dry-run" ]]; then DRY_RUN=true; elif [[ -n "${7:-}" ]]; then echo "Opzione sconosciuta: $7" >&2; exit 2; fi
+if [[ "${3:-}" == "--dry-run" ]]; then DRY_RUN=true; elif [[ -n "${3:-}" ]]; then echo "Opzione sconosciuta: $3" >&2; exit 2; fi
 
 VERSION="${CPI_ARTIFACT_VERSION:-1.0.0}"
 POLL_SECONDS="${CPI_POLL_SECONDS:-5}"
 MAX_POLLS="${CPI_MAX_POLLS:-60}"
 
-required_env=(
-  CPI_API_URL
-  CPI_TOKEN_URL
-  CPI_CLIENT_ID
-  CPI_CLIENT_SECRET
-)
-
-die() {
-  echo "ERROR: $*" >&2
-  exit 1
-}
-
-info() {
-  echo
-  echo "==> $*"
-}
-
-cleanup() {
-  if [[ -n "${WORKDIR:-}" && -d "${WORKDIR:-}" ]]; then
-    rm -rf "$WORKDIR"
-  fi
-}
+die() { echo "ERROR: $*" >&2; exit 1; }
+info() { echo; echo "==> $*"; }
+cleanup() { if [[ -n "${WORKDIR:-}" && -d "$WORKDIR" ]]; then rm -rf "$WORKDIR"; fi; }
 trap cleanup EXIT
 
-for cmd in curl jq unzip zip base64 python3; do
-  command -v "$cmd" >/dev/null 2>&1 || die "Comando richiesto non trovato: $cmd"
-done
-
-for var in "${required_env[@]}"; do
-  [[ -n "${!var:-}" ]] || die "Variabile ambiente non valorizzata: $var"
-done
-
-[[ -n "$SOURCE_ID" ]] || die "SOURCE_ID mancante"
-[[ -n "$SOURCE_PACKAGE" ]] || die "SOURCE_PACKAGE mancante"
-[[ -n "$TARGET_ID" ]] || die "TARGET_ID mancante"
-[[ -n "$TARGET_PACKAGE" ]] || die "TARGET_PACKAGE mancante"
-[[ -n "$TARGET_NAME" ]] || die "TARGET_NAME mancante"
-[[ -n "$CONFIG_JSON" ]] || die "CONFIG_JSON obbligatorio: ogni parametro deve essere classificato"
-[[ "$SOURCE_ID" != "$TARGET_ID" ]] || die "SOURCE_ID e TARGET_ID devono essere differenti"
-
-if [[ -n "$CONFIG_JSON" && ! -f "$CONFIG_JSON" ]]; then
-  die "File configurazione non trovato: $CONFIG_JSON"
-fi
-
+for cmd in curl jq zip base64 python3; do command -v "$cmd" >/dev/null 2>&1 || die "Comando richiesto non trovato: $cmd"; done
+[[ "$IFLOW" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$IFLOW" != *..* ]] || die "Nome cartella iFlow non valido"
+[[ "$ENVIRONMENT" =~ ^(SIT|UAT|PROD)$ ]] || die "Ambiente consentito: SIT, UAT oppure PROD"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-[[ -f "$SCRIPT_DIR/resolve-iflow-config.py" ]] || die "resolve-iflow-config.py non trovato accanto allo script"
-API="${CPI_API_URL%/}/api/v1"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+ARTIFACT_DIR="$REPO_ROOT/$IFLOW"
+[[ -d "$ARTIFACT_DIR" && ! -L "$ARTIFACT_DIR" ]] || die "Cartella iFlow non trovata: $ARTIFACT_DIR"
+ARTIFACT_JSON="$ARTIFACT_DIR/cicd/artifact.json"
+CONFIG_JSON="$ARTIFACT_DIR/cicd/${ENVIRONMENT,,}.json"
+[[ -f "$ARTIFACT_JSON" ]] || die "Manca $ARTIFACT_JSON"
+[[ -f "$CONFIG_JSON" ]] || die "Manca $CONFIG_JSON"
+[[ -f "$SCRIPT_DIR/resolve-iflow-config.py" ]] || die "Resolver non trovato in scripts/"
+
+# Validate JSON before reading values, and require known OData-safe technical IDs.
+jq -e --arg env "$ENVIRONMENT" '.source.artifactId | type == "string"' "$ARTIFACT_JSON" >/dev/null || die "source.artifactId non valido"
+SOURCE_ID="$(jq -r '.source.artifactId // empty' "$ARTIFACT_JSON")"
+SOURCE_PACKAGE="$(jq -r '.source.packageId // empty' "$ARTIFACT_JSON")"
+TARGET_ID="$(jq -r --arg env "$ENVIRONMENT" '.targets[$env].artifactId // empty' "$ARTIFACT_JSON")"
+TARGET_PACKAGE="$(jq -r --arg env "$ENVIRONMENT" '.targets[$env].packageId // empty' "$ARTIFACT_JSON")"
+TARGET_NAME="$(jq -r --arg env "$ENVIRONMENT" '.targets[$env].artifactName // empty' "$ARTIFACT_JSON")"
+VERSION="$(jq -r '.source.version // "1.0.0"' "$ARTIFACT_JSON")"
+for id in "$SOURCE_ID" "$TARGET_ID" "$SOURCE_PACKAGE" "$TARGET_PACKAGE"; do
+  [[ "$id" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || die "Technical ID/package non valido: $id"
+done
+[[ -n "$TARGET_NAME" ]] || die "artifactName target mancante"
+[[ "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "Versione artifact non valida"
+
 WORKDIR="$(mktemp -d)"
-SOURCE_ZIP="$WORKDIR/source.zip"
 TARGET_DIR="$WORKDIR/target"
 TARGET_ZIP="$WORKDIR/target.zip"
 CREATE_JSON="$WORKDIR/create.json"
 UPDATE_JSON="$WORKDIR/update.json"
+mkdir -p "$TARGET_DIR"
 
-info "Autenticazione OAuth"
+info "Packaging da Git: $IFLOW ($ENVIRONMENT)"
+# Include only artifact content, not cicd/, .git, local caches, credentials etc.
+python3 - "$ARTIFACT_DIR" "$TARGET_DIR" <<'PYTHON'
+from pathlib import Path
+import shutil, sys
+source, target = map(Path, sys.argv[1:])
+allowed = {'.project','metainfo.prop','META-INF','src'}
+actual = {p.name for p in source.iterdir()} - {'cicd'}
+extra = actual - allowed
+if extra:
+    raise SystemExit(f"Unknown top-level artifact entries (review packaging): {sorted(extra)}")
+for name in allowed:
+    path = source / name
+    if not path.exists():
+        if name in {'.project','META-INF','src'}:
+            raise SystemExit(f"Required artifact entry missing: {name}")
+        continue
+    if path.is_symlink() or any(p.is_symlink() for p in ([path] if path.is_file() else path.rglob('*'))):
+        raise SystemExit(f"Symlinks not allowed in artifact: {name}")
+    if path.is_dir():
+        shutil.copytree(path, target / name)
+    else:
+        shutil.copy2(path, target / name)
+PYTHON
 
-TOKEN_RESPONSE="$(
-  curl -sS -X POST \
-    "$CPI_TOKEN_URL" \
-    -u "$CPI_CLIENT_ID:$CPI_CLIENT_SECRET" \
-    -d "grant_type=client_credentials"
-)"
-
-TOKEN="$(jq -r '.access_token // empty' <<<"$TOKEN_RESPONSE")"
-[[ -n "$TOKEN" ]] || {
-  echo "$TOKEN_RESPONSE" | jq . >&2 || true
-  die "Impossibile ottenere access_token"
-}
-
-auth_header=(-H "Authorization: Bearer $TOKEN")
-
-info "Verifica artifact sorgente"
-
-SOURCE_META="$(
-  curl -fsS \
-    "$API/IntegrationDesigntimeArtifacts(Id='$SOURCE_ID',Version='$VERSION')" \
-    "${auth_header[@]}" \
-    -H "Accept: application/json"
-)" || die "Artifact sorgente non trovato o non accessibile: $SOURCE_ID"
-
-ACTUAL_SOURCE_PACKAGE="$(jq -r '.d.PackageId // empty' <<<"$SOURCE_META")"
-SOURCE_NAME="$(jq -r '.d.Name // empty' <<<"$SOURCE_META")"
-
-[[ "$ACTUAL_SOURCE_PACKAGE" == "$SOURCE_PACKAGE" ]] || \
-  die "Il source artifact appartiene al package '$ACTUAL_SOURCE_PACKAGE', non a '$SOURCE_PACKAGE'"
-
-echo "Source:  $SOURCE_ID"
-echo "Package: $SOURCE_PACKAGE"
-echo "Name:    $SOURCE_NAME"
-echo "Version: $VERSION"
-
-info "Download ZIP sorgente"
-
-curl -fsS \
-  "$API/IntegrationDesigntimeArtifacts(Id='$SOURCE_ID',Version='$VERSION')/\$value" \
-  "${auth_header[@]}" \
-  -o "$SOURCE_ZIP" \
-  || die "Download artifact sorgente fallito"
-
-unzip -q "$SOURCE_ZIP" -d "$TARGET_DIR"
-
-[[ -f "$TARGET_DIR/META-INF/MANIFEST.MF" ]] || die "META-INF/MANIFEST.MF non trovato"
-[[ -f "$TARGET_DIR/.project" ]] || die ".project non trovato"
+info "Validazione della configurazione $CONFIG_JSON"
+RESOLVED_CONFIG="$WORKDIR/resolved-config.json"
+python3 "$SCRIPT_DIR/resolve-iflow-config.py" "$TARGET_DIR" "$CONFIG_JSON" "$RESOLVED_CONFIG" || die "Configurazione non valida"
 
 info "Trasformazione Technical ID: $SOURCE_ID -> $TARGET_ID"
 
@@ -175,7 +101,8 @@ for path in (manifest, project):
     text = path.read_text(encoding="utf-8")
     if source_id not in text:
         raise SystemExit(f"Technical ID sorgente non trovato in {path}")
-    path.write_text(text.replace(source_id, target_id), encoding="utf-8")
+    if source_id != target_id:
+        path.write_text(text.replace(source_id, target_id), encoding="utf-8")
 PY
 
 # Controlli di sicurezza sui metadati trasformati.
@@ -190,14 +117,20 @@ grep -Fq "Origin-Bundle-SymbolicName: $TARGET_ID" "$TARGET_DIR/META-INF/MANIFEST
 grep -Fq "<name>$TARGET_ID</name>" "$TARGET_DIR/.project" \
   || die ".project non aggiornato correttamente"
 
-info "Risoluzione e validazione configurazione target (prima di ogni modifica)"
-RESOLVED_CONFIG="$WORKDIR/resolved-config.json"
-python3 "$SCRIPT_DIR/resolve-iflow-config.py" "$TARGET_DIR" "$CONFIG_JSON" "$RESOLVED_CONFIG" \
-  || die "Configurazione non valida: nessun aggiornamento eseguito"
 if [[ "$DRY_RUN" == true ]]; then
-  echo "DRY RUN: source scaricato, metadati trasformati e configurazione validata. Nessuna modifica a CPI."
+  info "DRY RUN completato: nessun accesso o modifica al tenant CPI"
   exit 0
 fi
+
+for var in CPI_API_URL CPI_TOKEN_URL CPI_CLIENT_ID CPI_CLIENT_SECRET; do
+  [[ -n "${!var:-}" ]] || die "Variabile ambiente mancante: $var"
+done
+API="${CPI_API_URL%/}/api/v1"
+info "Autenticazione OAuth"
+TOKEN_RESPONSE="$(curl -fsS -X POST "$CPI_TOKEN_URL" -u "$CPI_CLIENT_ID:$CPI_CLIENT_SECRET" -d 'grant_type=client_credentials')" || die "OAuth fallito"
+TOKEN="$(jq -r '.access_token // empty' <<<"$TOKEN_RESPONSE")"
+[[ -n "$TOKEN" ]] || die "Token OAuth assente"
+auth_header=(-H "Authorization: Bearer $TOKEN")
 
 info "Creazione ZIP target"
 
@@ -330,7 +263,6 @@ if [[ -s "$RESOLVED_CONFIG" ]]; then
     )"
 
     [[ "$CONFIG_CODE" =~ ^2 ]] || {
-      cat "$WORKDIR/config-response.txt" >&2
       die "Configurazione '$KEY' fallita, HTTP $CONFIG_CODE"
     }
 
@@ -407,7 +339,7 @@ echo "Runtime status: $RUNTIME_STATUS"
 echo
 echo "============================================================"
 echo "PROMOTION COMPLETATA"
-echo "Source : $SOURCE_PACKAGE / $SOURCE_ID"
+echo "Source : Git / $IFLOW ($SOURCE_PACKAGE / $SOURCE_ID)"
 echo "Target : $TARGET_PACKAGE / $TARGET_ID"
 echo "Deploy : SUCCESS"
 echo "Runtime: STARTED"
