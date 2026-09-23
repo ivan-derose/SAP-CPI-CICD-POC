@@ -18,7 +18,11 @@ jobs:
     name: Deploy Integration Flow to SIT
     runs-on: ubuntu-latest
     environment: SIT
-
+    env:
+      CPI_API_URL: ${{ secrets.CPI_API_URL }}
+      CPI_TOKEN_URL: ${{ secrets.CPI_TOKEN_URL }}
+      CPI_CLIENT_ID: ${{ secrets.CPI_CLIENT_ID }}
+      CPI_CLIENT_SECRET: ${{ secrets.CPI_CLIENT_SECRET }}
     steps:
       - name: Checkout SIT branch
         uses: actions/checkout@v4
@@ -39,11 +43,6 @@ jobs:
             --dry-run
 
       - name: Deploy Integration Flow
-        env:
-          CPI_API_URL: ${{ secrets.CPI_API_URL }}
-          CPI_TOKEN_URL: ${{ secrets.CPI_TOKEN_URL }}
-          CPI_CLIENT_ID: ${{ secrets.CPI_CLIENT_ID }}
-          CPI_CLIENT_SECRET: ${{ secrets.CPI_CLIENT_SECRET }}
         run: |
           bash scripts/promote-iflow.sh \
             Exchange_Return_Order_Event_Listener \
