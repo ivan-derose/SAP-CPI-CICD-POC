@@ -19,8 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: CPI_SIT
     env:
-      CPI_API_URL: ${{ secrets.CPI_API_URL }}
-      CPI_TOKEN_URL: ${{ secrets.CPI_TOKEN_URL }}
+      CPI_API_URL: ${{ vars.CPI_API_URL }}
+      CPI_TOKEN_URL: ${{ vars.CPI_TOKEN_URL }}
       CPI_CLIENT_ID: ${{ secrets.CPI_CLIENT_ID }}
       CPI_CLIENT_SECRET: ${{ secrets.CPI_CLIENT_SECRET }}
     steps:
