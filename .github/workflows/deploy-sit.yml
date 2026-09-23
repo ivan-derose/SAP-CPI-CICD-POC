@@ -17,7 +17,7 @@ jobs:
   deploy-sit:
     name: Deploy Integration Flow to SIT
     runs-on: ubuntu-latest
-    environment: SIT
+    environment: CPI_SIT
     env:
       CPI_API_URL: ${{ secrets.CPI_API_URL }}
       CPI_TOKEN_URL: ${{ secrets.CPI_TOKEN_URL }}
